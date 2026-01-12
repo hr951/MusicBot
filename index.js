@@ -1,9 +1,8 @@
 // ===== 強制 VoIP 初期化 =====
-process.env.DISCORD_VOIP_SODIUM = 'native';
+process.env.DISCORD_VOIP_SODIUM = 'wrappers';
 process.env.UV_USE_IO_URING = '0';
 
-// ★ これが決定打 ★
-require('sodium-native');
+require('libsodium-wrappers');
 
 require("./server.js");
 
