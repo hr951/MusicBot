@@ -1,29 +1,34 @@
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, Collection } = require('discord.js');
 const { Connectors } = require('shoukaku');
 const { Kazagumo } = require('kazagumo');
+const path = require('node:path');
+const fs = require('node:fs');
 require("dotenv").config();
 require("./server.js");
 
-// --- 設定 ---
-const TOKEN = process.env.DISCORD_BOT_TOKEN; // ボットのトークン
+const token = process.env.DISCORD_BOT_TOKEN;
 const PREFIX = "!";
 const Nodes = [{
     name: 'Render-Node',
-    url: process.env.LAVA_LINK_URL, // RenderのURL (ポート443を指定)
-    auth: process.env.LAVA_LINK_AUTH, // application.ymlで設定したパスワード
-    secure: true // HTTPS(443)を使う場合は必ずtrue
+    url: process.env.LAVA_LINK_URL, // URL (PORT -> 443)
+    auth: process.env.LAVA_LINK_AUTH, // パスワード
+    secure: true // HTTPS(443) -> true
 }];
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMembers,
         GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.GuildMessageReactions,
+        GatewayIntentBits.MessageContent,
+        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.MessageContent
+        GatewayIntentBits.GuildPresences
     ]
 });
 
-// Kazagumoの初期化部分を変更
+// ----- Kazagumo初期化 -----
 const kazagumo = new Kazagumo({
     defaultSearchEngine: "soundcloud",
     send: (guildId, payload) => {
@@ -36,88 +41,61 @@ kazagumo.on("playerStart", (player, track) => {
     player.data.get("textChannel").send(`再生中: **${track.title}**`);
 });
 
-client.on("messageCreate", async (message) => {
-    if (!message.content.startsWith(PREFIX) || message.author.bot) return;
+client.kazagumo = kazagumo;
+client.kazagumo.shoukaku.on('ready', (name) => console.log(`Lavalink Node: ${name} が接続されました！`));
+// ----- Kazagumo初期化終了 -----
 
-    const args = message.content.slice(PREFIX.length).trim().split(/ +/);
-    const command = args.shift().toLowerCase();
-    const player = kazagumo.players.get(message.guild.id);
+// ---- コマンド読み込み処理 ----
+client.commands = new Collection();
 
-    // !play <検索語句 or URL>
-    if (command === "play") {
-        const query = args.join(" ");
-        if (!message.member.voice.channel) return message.reply("VCに入ってください");
-        if (!query) return message.reply("曲名かURLを入力してください");
+const commandsPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
 
-        let res = await kazagumo.search(query);
-        if (!res.tracks.length) return message.reply("見つかりませんでした");
-
-        const newPlayer = await kazagumo.createPlayer({
-            guildId: message.guild.id,
-            textId: message.channel.id,
-            voiceId: message.member.voice.channel.id,
-            deaf: true
-        });
-
-        newPlayer.data.set("textChannel", message.channel);
-        newPlayer.queue.add(res.tracks[0]);
-        if (!newPlayer.playing && !newPlayer.paused) newPlayer.play();
-        return message.reply(`**${res.tracks[0].title}**をキューに追加しました`);
+for (const file of commandFiles) {
+    const filePath = path.join(commandsPath, file);
+    const command = require(filePath);
+    if ('data' in command && 'execute' in command) {
+        client.commands.set(command.data.name, command);
+    } else {
+        console.log(`${filePath} に必要な "data" か "execute" がありません。`);
     }
+}
 
-    // !skip
-    if (command === "skip") {
-        if (!player) return message.reply("再生中の曲がありません");
-        player.skip();
-        return message.reply("曲をスキップしました");
-    }
+client.on('interactionCreate', async interaction => {
+    if (interaction.isChatInputCommand()) {
 
-    // !loop (track / queue / none)
-    if (command === "loop") {
-        if (!player) return message.reply("再生中の曲がありません");
-        const mode = args[0] || (player.loop === "none" ? "track" : player.loop === "track" ? "queue" : "none");
-        player.setLoop(mode);
-        return message.reply(`ループモードを **${mode}** に設定しました`);
-    }
+        const command = interaction.client.commands.get(interaction.commandName);
 
-    // !queue
-    if (command === "queue") {
-        if (!player) return message.reply("再生中の曲がありません");
-        const q = player.queue.map((t, i) => `${i + 1}. ${t.title}`).join("\n");
-        return message.reply(`📜 **現在のキュー:**\n${q || "空っぽです"}`);
-    }
+        if (!command) {
+            console.error(`${interaction.commandName} が見つかりません。`);
+            return;
+        }
 
-    // !nowplaying (np)
-    if (command === "nowplaying" || command === "np") {
-        if (!player) return message.reply("再生中の曲がありません");
-        return message.reply(`再生中: **${player.queue.current.title}**`);
-    }
-
-    // !stop
-    if (command === "stop") {
-        if (!player) return message.reply("再生中の曲がありません");
-
-        // プレイヤーを破棄（曲を停止、キューをクリア、ボイスチャンネルから退出を一括で行う）
-        player.destroy();
-
-        return message.reply("再生を停止し、キューをクリアして退出しました");
-    }
-
-    if (!player) return;
+        try {
+            await command.execute(interaction);
+        } catch (error) {
+            try {
+                await interaction.reply({ content: 'error', ephemeral: true });
+                console.error(error);
+            } catch (error) {
+                console.error(error);
+            }
+        }
+    };
 });
+// ---- コマンド読み込み処理終了 ----
 
 // 誰かがボイスチャンネルからいなくなった時の処理
 client.on("voiceStateUpdate", (oldState, newState) => {
     const player = kazagumo.players.get(oldState.guild.id);
     if (!player) return;
 
-    // ボットしかチャンネルにいなくなったら
     const voiceChannel = client.channels.cache.get(player.voiceId);
     if (voiceChannel && voiceChannel.members.filter(m => !m.user.bot).size === 0) {
         player.destroy();
         const textChannel = client.channels.cache.get(player.textId);
-        if (textChannel) textChannel.send("誰もいなくなったので退出しました。");
+        if (textChannel) textChannel.send("誰もいなくなったので退出しました");
     }
 });
 
-client.login(TOKEN);
+client.login(token);
