@@ -1,1 +1,1 @@
-# music-test
+# MusicBot
